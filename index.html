@@ -101,15 +101,15 @@ input,select{font:inherit}
 
 .board{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}
 .card{appearance:none;border:0;text-align:left;border-radius:22px;padding:18px 18px 16px;min-height:190px;display:flex;flex-direction:column;gap:10px;justify-content:space-between;background:var(--c);color:var(--cfg);box-shadow:var(--shadow);position:relative;transition:transform .15s ease, box-shadow .15s}
-.card:not(.taken):hover{transform:translateY(-3px) rotate(-.6deg)}
+.card:not(.mine):hover{transform:translateY(-3px) rotate(-.6deg)}
 .card .cat{font-size:14px;font-weight:700;opacity:.9}
 .card .t{font-family:var(--display);font-weight:700;font-size:22px;letter-spacing:-.01em;line-height:1.15;font-variation-settings:"opsz" 48;overflow-wrap:anywhere;text-wrap:balance}
 .card .foot{font-size:14px;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:8px}
-.card.taken{background:var(--taken);color:var(--taken-fg);cursor:default;box-shadow:none}
-.card.taken .t{text-decoration:line-through;text-decoration-thickness:2px}
-.card.taken .who{background:var(--surface);color:var(--ink);border-radius:999px;padding:2px 10px;font-weight:800;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card.mine{background:var(--c);color:var(--cfg);outline:4px solid var(--ink);outline-offset:3px}
-.card.mine .t{text-decoration:none}
+.card .pickers{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
+.card .pickers li{background:rgba(255,255,255,.92);color:var(--ink);border-radius:999px;padding:2px 10px;font-size:13px;font-weight:700;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .pickers li.you{background:var(--ink);color:#fff}
+.card .count{font-size:14px;font-weight:700;opacity:.9}
 .card.fresh{animation:pop .5s cubic-bezier(.2,1.6,.4,1)}
 @keyframes pop{0%{transform:scale(.92)}100%{transform:scale(1)}}
 .confirm{display:flex;flex-direction:column;gap:8px}
@@ -190,7 +190,7 @@ input,select{font:inherit}
         <div class="box" id="meBox"></div>
 
         <div class="box">
-          <div class="label">Topics taken</div>
+          <div class="label">Presenters so far</div>
           <div class="stats"><b id="takenN">0</b><span class="hint" id="takenOf"></span></div>
           <div class="meter" id="meter" aria-hidden="true"></div>
         </div>
@@ -208,7 +208,6 @@ input,select{font:inherit}
       <div class="board-col" style="display:flex;flex-direction:column;gap:14px;min-width:0">
         <div class="board-head">
           <div class="filters" id="filters"></div>
-          <label class="toggle"><input type="checkbox" id="hideTaken"> Hide taken</label>
         </div>
         <div class="board" id="board" aria-live="polite"></div>
       </div>
@@ -258,7 +257,7 @@ input,select{font:inherit}
             <button class="btn small" id="clearDoneBtn">Reset ticks</button>
           </div>
         </div>
-        <p class="hint">In the order people claimed. Tap a name to put them on stage.</p>
+        <p class="hint">In the order people picked. Tap a name to put them on stage.</p>
         <ul class="order" id="order"></ul>
       </div>
     </div>
@@ -273,8 +272,9 @@ input,select{font:inherit}
 const CONFIG = {
   SUPABASE_URL: "https://fpxdmxrilydyikeejimj.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZweGRteHJpbHlkeWlrZWVqaW1qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5ODUzMDcsImV4cCI6MjA5ODU2MTMwN30.vHIe29JrmKWr7KZFH19LbsuvjOmCvMCiOJJF0mvYJ-M",
-  TAGLINE: "Claim a topic before someone else does, make a few slides, then tell the room.",
+  TAGLINE: "Pick a topic, make a few slides, then tell the room. Friends can share a topic and give their own take.",
   TABLE: "trib3_topics",   // this event's own tables in Supabase (see supabase-setup.sql)
+  PICKS: "trib3_picks",
   RPC: "trib3_"
 };
 
@@ -316,53 +316,63 @@ function liveApi(){
   const rpc = async (fn, args) => { const { data, error } = await sb.rpc(fn, args); if (error) throw error; return data || {}; };
   return {
     async list(){
-      const { data, error } = await sb.from(CONFIG.TABLE).select("id,title,category,claimed_by,claimed_at,created_at").order("created_at", { ascending: true });
-      if (error) throw error; return data;
+      const [t, p] = await Promise.all([
+        sb.from(CONFIG.TABLE).select("id,title,category,created_at").order("created_at", { ascending: true }),
+        sb.from(CONFIG.PICKS).select("id,topic_id,name,created_at").order("created_at", { ascending: true })
+      ]);
+      if (t.error) throw t.error;
+      if (p.error) throw p.error;
+      return { topics: t.data, picks: p.data };
     },
     claim: (id, name, token) => rpc(CONFIG.RPC + "claim_topic", { p_topic: id, p_name: name, p_token: token }),
     claimRandom: (name, token) => rpc(CONFIG.RPC + "claim_random_topic", { p_name: name, p_token: token }),
     release: token => rpc(CONFIG.RPC + "release_topic", { p_token: token }),
     add: (title, category) => rpc(CONFIG.RPC + "add_topic", { p_title: title, p_category: category }),
     subscribe(cb){
-      sb.channel("trib3-topics-live").on("postgres_changes", { event: "*", schema: "public", table: CONFIG.TABLE }, cb).subscribe();
+      sb.channel("trib3-live")
+        .on("postgres_changes", { event: "*", schema: "public", table: CONFIG.TABLE }, cb)
+        .on("postgres_changes", { event: "*", schema: "public", table: CONFIG.PICKS }, cb)
+        .subscribe();
       setInterval(cb, 15000);
     }
   };
 }
 
 function demoApi(){
-  const KEY = "t3.demo.v1";
+  const KEY = "t3.demo.v2";
   let db = store.get(KEY, null);
   if (!db){
     const t0 = Date.now() - 3600e3;
-    const topics = SEED.map(([title, category], i) => ({ id: "d" + i, title, category, claimed_by: null, claimed_at: null, created_at: new Date(t0 + i).toISOString() }));
-    [["Ada",2],["Tobi",0]].forEach(([n,i],k) => { topics[i].claimed_by = n; topics[i].claimed_at = new Date(t0 + 60e3*(k+1)).toISOString(); });
-    db = { topics, tokens: {} };
+    const topics = SEED.map(([title, category], i) => ({ id: "d" + i, title, category, created_at: new Date(t0 + i).toISOString() }));
+    const picks = [["Ada",2],["Tobi",0],["Kemi",2]].map(([name,i],k) => ({ id: "p" + k, topic_id: "d" + i, name, created_at: new Date(t0 + 60e3*(k+1)).toISOString() }));
+    db = { topics, picks, tokens: {} };
   }
   const save = () => store.set(KEY, db);
-  const ok = id => ({ status: "ok", topic_id: id });
   return {
-    async list(){ return db.topics.map(t => ({...t})); },
+    async list(){ return { topics: db.topics.map(t => ({...t})), picks: db.picks.map(p => ({...p})) }; },
     async claim(id, name, token){
       if (Object.values(db.tokens).includes(token)) return { status: "already_have_one" };
-      const t = db.topics.find(x => x.id === id);
-      if (!t || t.claimed_by) return { status: "taken" };
-      t.claimed_by = name; t.claimed_at = new Date().toISOString(); db.tokens[id] = token; save(); return ok(id);
+      if (!db.topics.some(x => x.id === id)) return { status: "no_topic" };
+      const pick = { id: "p" + Date.now(), topic_id: id, name, created_at: new Date().toISOString() };
+      db.picks.push(pick); db.tokens[pick.id] = token; save();
+      return { status: "ok", topic_id: id, pick_id: pick.id };
     },
     async claimRandom(name, token){
       if (Object.values(db.tokens).includes(token)) return { status: "already_have_one" };
-      const free = db.topics.filter(t => !t.claimed_by);
-      if (!free.length) return { status: "none_left" };
-      return this.claim(free[Math.floor(Math.random()*free.length)].id, name, token);
+      if (!db.topics.length) return { status: "none_left" };
+      const n = t => db.picks.filter(p => p.topic_id === t.id).length;
+      const fewest = Math.min(...db.topics.map(n));
+      const pool = db.topics.filter(t => n(t) === fewest);
+      return this.claim(pool[Math.floor(Math.random()*pool.length)].id, name, token);
     },
     async release(token){
       const id = Object.keys(db.tokens).find(k => db.tokens[k] === token);
       if (!id) return { status: "not_found" };
-      const t = db.topics.find(x => x.id === id); t.claimed_by = null; t.claimed_at = null; delete db.tokens[id]; save(); return { status: "ok" };
+      db.picks = db.picks.filter(p => p.id !== id); delete db.tokens[id]; save(); return { status: "ok" };
     },
     async add(title, category){
       if (db.topics.some(t => t.title.trim().toLowerCase() === title.trim().toLowerCase())) return { status: "duplicate" };
-      db.topics.push({ id: "u" + Date.now(), title, category, claimed_by: null, claimed_at: null, created_at: new Date().toISOString() }); save(); return { status: "ok" };
+      db.topics.push({ id: "u" + Date.now(), title, category, created_at: new Date().toISOString() }); save(); return { status: "ok" };
     },
     subscribe(){}
   };
@@ -372,6 +382,7 @@ const api = LIVE ? liveApi() : demoApi();
 
 /* ─── state ─── */
 let topics = [];
+let picks = [];
 let me = store.get("t3.me", null) || { name: "", token: uuid() };
 store.set("t3.me", me);
 let filter = "All";
@@ -381,7 +392,14 @@ let busy = false;
 const show = store.get("t3.show.v1", { order: null, done: [], current: null, minutes: 10 });
 const saveShow = () => store.set("t3.show.v1", show);
 
-const myTopic = () => me.topicId ? topics.find(t => t.id === me.topicId && t.claimed_by) : null;
+const myPick = () => me.pickId ? picks.find(p => p.id === me.pickId) : null;
+/* My topic, shaped like a running-order entry ({...topic, claimed_by: my name}). */
+const myTopic = () => {
+  const p = myPick(); if (!p) return null;
+  const t = topics.find(x => x.id === p.topic_id);
+  return t ? { ...t, claimed_by: p.name } : null;
+};
+const picksFor = id => picks.filter(p => p.topic_id === id);
 
 /* ─── data refresh ─── */
 let refreshing = false, again = false;
@@ -389,8 +407,14 @@ async function refresh(){
   if (refreshing){ again = true; return; }
   refreshing = true;
   try {
-    topics = await api.list();
-    if (me.topicId && !topics.some(t => t.id === me.topicId && t.claimed_by)){ delete me.topicId; store.set("t3.me", me); }
+    ({ topics, picks } = await api.list());
+    // a pick made with the earlier version of this page: find it by topic and name
+    if (!me.pickId && me.topicId){
+      const old = picks.find(p => p.topic_id === me.topicId && p.name === (me.name || "").trim());
+      if (old) me.pickId = old.id;
+      delete me.topicId; store.set("t3.me", me);
+    }
+    if (me.pickId && !myPick()){ delete me.pickId; store.set("t3.me", me); }
     render();
   } catch(e){
     showBanner(`Couldn't reach the topic board. Check your connection, then refresh the page.`);
@@ -404,7 +428,7 @@ async function refresh(){
 let meKey = null;
 function renderMe(){
   const mine = myTopic();
-  const key = mine ? `${mine.id}|${mine.claimed_by}|${mine.title}` : "none";
+  const key = mine ? `${me.pickId}|${mine.claimed_by}|${mine.title}|${picksFor(mine.id).length}` : "none";
   if (key === meKey) return;
   meKey = key;
   if (mine){
@@ -413,6 +437,7 @@ function renderMe(){
       <div class="ticket" style="background:${c.c};color:${c.fg}">
         <div class="label" style="color:inherit;opacity:.85">${esc(mine.claimed_by)}, you're presenting</div>
         <div class="t">${esc(mine.title)}</div>
+        ${picksFor(mine.id).length > 1 ? `<div style="font-size:14px;font-weight:700;opacity:.9">${picksFor(mine.id).length - 1} other ${picksFor(mine.id).length === 2 ? "person has" : "people have"} this topic too. Same topic, your take.</div>` : ""}
         <div class="row"><span style="font-size:13px;font-weight:700;opacity:.9">${esc(mine.category)}</span>
           <button class="btn small" id="releaseBtn" style="background:rgba(255,255,255,.94);color:var(--ink)">Swap topic</button></div>
       </div></div>`;
@@ -420,7 +445,7 @@ function renderMe(){
     $("meBox").outerHTML = `<form class="box" id="meBox">
       <label class="label" for="nameInput">Your name</label>
       <div class="field"><input id="nameInput" type="text" maxlength="40" placeholder="So everyone knows it's yours" value="${esc(me.name)}" autocomplete="given-name"></div>
-      <p class="hint">Tap a topic card to claim it. First come, first served.</p>
+      <p class="hint">Tap a topic to pick it. Several people can pick the same topic; each person picks one.</p>
       <button class="btn surprise" type="button" id="surpriseBtn">Can't decide? Surprise me</button>
     </form>`;
     $("nameInput").addEventListener("input", e => { me.name = e.target.value; store.set("t3.me", me); });
@@ -429,18 +454,19 @@ function renderMe(){
 }
 
 function renderStats(){
-  const taken = topics.filter(t => t.claimed_by).length;
-  $("takenN").textContent = taken;
-  $("takenOf").textContent = `of ${topics.length} · ${topics.length - taken} still free`;
+  const used = new Set(picks.map(p => p.topic_id)).size;
+  $("takenN").textContent = picks.length;
+  $("takenOf").textContent = `across ${used} of ${topics.length} ${topics.length === 1 ? "topic" : "topics"}`;
   const counts = {};
-  topics.filter(t => t.claimed_by).forEach(t => counts[t.category] = (counts[t.category]||0) + 1);
-  $("meter").innerHTML = Object.entries(counts).map(([k,n]) => `<i style="width:${n/Math.max(1,topics.length)*100}%;background:${cat(k).c}"></i>`).join("");
+  picks.forEach(p => { const t = topics.find(x => x.id === p.topic_id); if (t) counts[t.category] = (counts[t.category]||0) + 1; });
+  $("meter").innerHTML = Object.entries(counts).map(([k,n]) => `<i style="width:${n/Math.max(1,picks.length)*100}%;background:${cat(k).c}"></i>`).join("");
 }
 
 function renderFilters(){
   const present = [...new Set(topics.map(t => t.category))];
   const crowded = present.some(k => topics.filter(t => t.category === k).length > 1);
   $("filters").hidden = !crowded;
+  $("filters").parentElement.hidden = !crowded;   // the row only holds the filters now
   if (!crowded && filter !== "All") filter = "All";
   const order = Object.keys(CATS).filter(k => present.includes(k)).concat(present.filter(k => !CATS[k]));
   $("filters").innerHTML = ["All", ...order].map(k => `<button class="fchip" data-filter="${esc(k)}" aria-pressed="${filter===k}">${k==="All"?"":`<span class="dot" style="background:${cat(k).c}"></span>`}${esc(k)}</button>`).join("");
@@ -448,35 +474,42 @@ function renderFilters(){
 }
 
 function renderBoard(){
-  const hide = $("hideTaken").checked;
   const mineId = myTopic()?.id;
-  const list = topics.filter(t => (filter === "All" || t.category === filter) && (!hide || !t.claimed_by || t.id === mineId));
-  if (!list.length){ $("board").innerHTML = `<div class="empty">${hide ? "Every topic here is taken. Untick “Hide taken” to see who has what, or suggest a new one." : "No topics in this category yet."}</div>`; return; }
+  const list = topics.filter(t => filter === "All" || t.category === filter);
+  if (!list.length){ $("board").innerHTML = `<div class="empty">No topics in this category yet. Suggest one in the box on the left.</div>`; return; }
   $("board").innerHTML = list.map(t => {
     const c = cat(t.category);
     const mine = t.id === mineId;
-    const cls = ["card", t.claimed_by && !mine ? "taken" : "", mine ? "mine" : "", t.id === freshId ? "fresh" : ""].join(" ");
+    const who = picksFor(t.id);
+    const cls = ["card", mine ? "mine" : "", t.id === freshId ? "fresh" : ""].join(" ");
     const style = `--c:${c.c};--cfg:${c.fg}`;
-    if (t.id === pendingId && !t.claimed_by){
+    const shown = who.slice(0, 6);
+    const people = who.length
+      ? `<ul class="pickers" aria-label="Presenting this topic">${shown.map(p => `<li class="${p.id === me.pickId ? "you" : ""}">${p.id === me.pickId ? "You" : esc(p.name)}</li>`).join("")}${who.length > shown.length ? `<li>+${who.length - shown.length} more</li>` : ""}</ul>`
+      : "";
+    if (t.id === pendingId && !mine){
       return `<div class="${cls}" style="${style}">
         <span class="cat">${esc(t.category)}</span>
         <span class="t">${esc(t.title)}</span>
-        <div class="confirm"><span class="q">Claim this as ${esc(me.name.trim())}?</span>
-          <div class="row"><button class="btn small go" data-claim="${esc(t.id)}">Yes, it's mine</button><button class="btn small" data-cancel="1">Cancel</button></div></div>
+        <div class="confirm"><span class="q">Pick this as ${esc(me.name.trim())}?</span>
+          <div class="row"><button class="btn small go" data-claim="${esc(t.id)}">Yes, I'll do it</button><button class="btn small" data-cancel="1">Cancel</button></div></div>
       </div>`;
     }
-    const foot = t.claimed_by
-      ? `<span class="who">${mine ? "Yours" : esc(t.claimed_by)}</span>`
-      : `<span>Claim it</span><span aria-hidden="true">→</span>`;
-    return `<button class="${cls}" style="${style}" ${t.claimed_by ? 'aria-disabled="true" tabindex="-1"' : `data-pick="${esc(t.id)}"`}>
-      <span class="cat">${esc(t.category)}</span><span class="t">${esc(t.title)}</span><span class="foot">${foot}</span></button>`;
+    const count = who.length ? `${who.length} presenting` : "Nobody yet";
+    const foot = mine ? `<span>Your topic</span>` : `<span>Pick this <span aria-hidden="true">→</span></span>`;
+    return `<button class="${cls}" style="${style}" ${mine ? 'aria-disabled="true"' : `data-pick="${esc(t.id)}"`} aria-label="${esc(t.title)}. ${count}.">
+      <span class="cat">${esc(t.category)}</span><span class="t">${esc(t.title)}</span>
+      ${people}<span class="foot"><span class="count">${count}</span>${foot}</span></button>`;
   }).join("");
   freshId = null;
 }
 
 /* ─── render: showtime ─── */
 function lineup(){
-  const claimed = topics.filter(t => t.claimed_by).sort((a,b) => (a.claimed_at||"").localeCompare(b.claimed_at||""));
+  const claimed = picks.map(p => {
+    const t = topics.find(x => x.id === p.topic_id);
+    return t ? { id: p.id, claimed_by: p.name, title: t.title, category: t.category, claimed_at: p.created_at } : null;
+  }).filter(Boolean).sort((a,b) => (a.claimed_at||"").localeCompare(b.claimed_at||""));
   if (show.order){
     const pos = new Map(show.order.map((id,i) => [id,i]));
     claimed.sort((a,b) => (pos.has(a.id)?pos.get(a.id):1e6) - (pos.has(b.id)?pos.get(b.id):1e6));
@@ -492,7 +525,7 @@ function renderShow(){
       <button data-stage="${esc(t.id)}"><span class="n">${String(i+1).padStart(2,"0")}</span>
       <span><span class="nm">${esc(t.claimed_by)}</span><br><span class="tp">${esc(t.title)}</span></span>
       <span class="st">${t.id===show.current?"On stage":done?"Done":""}</span></button></li>`;
-  }).join("") : `<li class="empty">Nobody has claimed a topic yet. Share the link and watch this fill up.</li>`;
+  }).join("") : `<li class="empty">Nobody has picked a topic yet. Share the link and watch this fill up.</li>`;
   const spot = $("spot");
   if (cur && !rolling){
     const c = cat(cur.category);
@@ -505,7 +538,7 @@ function renderShow(){
     const left = list.filter(t => !show.done.includes(t.id)).length;
     $("spotEyebrow").textContent = left ? `${left} ${left===1?"talk":"talks"} to go` : list.length ? "That's a wrap" : "Waiting for picks";
     $("spotName").textContent = left ? "Who's next?" : list.length ? "Great show!" : "Nobody yet";
-    $("spotTopic").textContent = left ? "Tap Spin for next, or pick someone from the running order." : list.length ? "Every talk is done. Thanks for sharing, everyone." : "Once people claim topics, they appear here.";
+    $("spotTopic").textContent = left ? "Tap Spin for next, or pick someone from the running order." : list.length ? "Every talk is done. Thanks for sharing, everyone." : "Once people pick topics, they appear here.";
   }
   $("spinBtn").disabled = !list.some(t => !show.done.includes(t.id) && t.id !== show.current);
   $("doneBtn").disabled = !cur;
@@ -540,16 +573,16 @@ async function surprise(){
 }
 function handleClaim(r, id){
   const s = r && r.status;
-  if (s === "ok"){ me.topicId = r.topic_id || id; store.set("t3.me", me); freshId = me.topicId; burst(); toast("It's yours! Start on those slides."); }
-  else if (s === "taken") toast("Too slow! Someone just grabbed that one.");
+  if (s === "ok"){ me.pickId = r.pick_id; store.set("t3.me", me); freshId = r.topic_id || id; burst(); toast("You're on! Start on those slides."); }
   else if (s === "already_have_one") toast("You already have a topic. Swap it first.");
-  else if (s === "none_left") toast("Every topic is taken. Suggest a new one in the box on the left.");
+  else if (s === "no_topic") toast("That topic was just removed. Pick another.");
+  else if (s === "none_left") toast("There are no topics yet. Suggest one in the box on the left.");
   else if (s === "bad_name") toast("Names need 1 to 40 characters.");
   else toast("That didn't go through. Try again.");
 }
 async function release(){
   if (busy) return; busy = true;
-  try{ await api.release(me.token); delete me.topicId; store.set("t3.me", me); toast("Topic released. Pick another!"); }
+  try{ await api.release(me.token); delete me.pickId; store.set("t3.me", me); toast("Topic released. Pick another!"); }
   catch(e){ toast("Couldn't release it. Try again."); }
   finally{ busy = false; refresh(); }
 }
@@ -582,7 +615,6 @@ document.addEventListener("click", e => {
     case "clearDoneBtn": show.done = []; show.current = null; saveShow(); resetClock(); renderShow(); break;
   }
 });
-$("hideTaken").addEventListener("change", renderBoard);
 $("suggestForm").addEventListener("submit", async e => {
   e.preventDefault();
   const title = $("sTitle").value.trim();
@@ -687,7 +719,7 @@ function showBanner(html){ $("banner").innerHTML = html; $("banner").hidden = fa
 /* ─── boot ─── */
 $("tagline").textContent = CONFIG.TAGLINE;
 if (!LIVE){
-  showBanner(`<span>Demo mode: picks save on this device only, and Ada and Tobi are example players.</span><span>Add your Supabase URL and key in <code>CONFIG</code> to share it with everyone.</span>`);
+  showBanner(`<span>Demo mode: picks save on this device only, and Ada, Tobi and Kemi are example players.</span><span>Add your Supabase URL and key in <code>CONFIG</code> to share it with everyone.</span>`);
 }
 setTab(location.hash === "#showtime" ? "show" : "pick");
 resetClock();
